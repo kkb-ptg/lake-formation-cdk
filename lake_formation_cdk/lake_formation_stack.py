@@ -33,12 +33,23 @@ from aws_cdk import (
     aws_athena as athena,
     aws_events as events,
     aws_events_targets as targets,
-    aws_lambda as lambda_,
+    aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as sfn_tasks,
 )
 import aws_cdk.aws_glue_alpha as glue_alpha
 from constructs import Construct
 from lake_formation_cdk.config import (
-    PREFIX,
+    LF_SERVICE_ROLE_NAME,
+    GLUE_JOB_ROLE_NAME,
+    ANALYST_ALICE_NAME,
+    ANALYST_BOB_NAME,
+    GLUE_DATABASE_NAME,
+    CRAWLER_NAME,
+    GLUE_JOB_NAME,
+    ROW_FILTER_NAME,
+    ATHENA_WORKGROUP_NAME,
+    EVENTBRIDGE_RULE_NAME,
+    STATE_MACHINE_NAME,
     data_lake_bucket_name,
     athena_results_bucket_name,
     glue_scripts_bucket_name,
@@ -115,7 +126,7 @@ class LakeFormationStack(Stack):
         lf_service_role = iam.Role(
             self,
             "LakeFormationServiceRole",
-            role_name=f"{PREFIX}-lf-service-role",
+            role_name=LF_SERVICE_ROLE_NAME,
             assumed_by=iam.ServicePrincipal("lakeformation.amazonaws.com"),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
@@ -137,7 +148,7 @@ class LakeFormationStack(Stack):
         glue_role = iam.Role(
             self,
             "GlueJobRole",
-            role_name=f"{PREFIX}-glue-job-role",
+            role_name=GLUE_JOB_ROLE_NAME,
             assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSGlueServiceRole"),
@@ -161,7 +172,7 @@ class LakeFormationStack(Stack):
         analyst_alice = iam.User(
             self,
             "AnalystAlice",
-            user_name=f"{PREFIX}-analyst-alice",
+            user_name=ANALYST_ALICE_NAME,
             password=cdk_secret_value("AliceP@ssw0rd!"),
         )
         analyst_alice.add_managed_policy(
@@ -189,7 +200,7 @@ class LakeFormationStack(Stack):
         analyst_bob = iam.User(
             self,
             "AnalystBob",
-            user_name=f"{PREFIX}-analyst-bob",
+            user_name=ANALYST_BOB_NAME,
             password=cdk_secret_value("BobP@ssw0rd!"),
         )
         analyst_bob.add_managed_policy(
@@ -251,7 +262,7 @@ class LakeFormationStack(Stack):
         glue_db = glue_alpha.Database(
             self,
             "PocDatabase",
-            database_name=f"{PREFIX}_database",
+            database_name=GLUE_DATABASE_NAME,
             description="Lake Formation + Glue PoC database",
             location_uri=f"s3://{data_lake_bucket.bucket_name}/",
         )
@@ -271,7 +282,7 @@ class LakeFormationStack(Stack):
             resource=lf.CfnPermissions.ResourceProperty(
                 database_resource=lf.CfnPermissions.DatabaseResourceProperty(
                     catalog_id=account,
-                    name=f"{PREFIX}_database",
+                    name=GLUE_DATABASE_NAME,
                 )
             ),
             permissions=["CREATE_TABLE", "ALTER", "DESCRIBE"],
@@ -300,9 +311,9 @@ class LakeFormationStack(Stack):
         glue_crawler = glue.CfnCrawler(
             self,
             "RawCustomersCrawler",
-            name=f"{PREFIX}-raw-customers-crawler",
+            name=CRAWLER_NAME,
             role=glue_role.role_arn,
-            database_name=f"{PREFIX}_database",
+            database_name=GLUE_DATABASE_NAME,
             targets=glue.CfnCrawler.TargetsProperty(
                 s3_targets=[
                     glue.CfnCrawler.S3TargetProperty(
@@ -329,34 +340,88 @@ class LakeFormationStack(Stack):
         glue_crawler.node.add_dependency(glue_db)
 
         # ──────────────────────────────────────────────────────────────────────
-        # 7.  S3 EVENT → EVENTBRIDGE → LAMBDA → START CRAWLER
-        #     Fires the crawler automatically whenever a new object lands under
-        #     raw/customers/.  The Lambda is minimal — it just calls StartCrawler.
+        # 7.  STEP FUNCTIONS — INGEST PIPELINE
+        #     Triggered by EventBridge on S3 ObjectCreated under raw/customers/.
+        #     Flow: StartCrawler → poll until READY → check result → RunEtlJob.
         # ──────────────────────────────────────────────────────────────────────
-        crawler_trigger_fn = lambda_.Function(
-            self,
-            "CrawlerTriggerFn",
-            function_name=f"{PREFIX}-crawler-trigger",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="index.handler",
-            code=lambda_.Code.from_inline(
-                "import boto3, os\n"
-                "def handler(e, c):\n"
-                "    boto3.client('glue').start_crawler(Name=os.environ['CRAWLER_NAME'])\n"
-            ),
-            environment={"CRAWLER_NAME": f"{PREFIX}-raw-customers-crawler"},
-        )
-        crawler_trigger_fn.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["glue:StartCrawler"],
-                resources=["*"],
-            )
+
+        # 1. Start the crawler
+        start_crawler_task = sfn_tasks.CallAwsService(
+            self, "StartCrawler",
+            service="glue",
+            action="startCrawler",
+            parameters={"Name": CRAWLER_NAME},
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.DISCARD,
         )
 
+        # 2. Wait before polling
+        wait_for_crawler = sfn.Wait(
+            self, "WaitForCrawler",
+            time=sfn.WaitTime.duration(Duration.seconds(30)),
+        )
+
+        # 3. Poll crawler state
+        get_crawler_status = sfn_tasks.CallAwsService(
+            self, "GetCrawlerStatus",
+            service="glue",
+            action="getCrawler",
+            parameters={"Name": CRAWLER_NAME},
+            iam_resources=["*"],
+            result_path="$.CrawlerStatus",
+        )
+
+        # 4. Terminal states
+        crawler_failed = sfn.Fail(
+            self, "CrawlerFailed",
+            cause="Glue crawler did not succeed",
+        )
+
+        # 5. Run ETL job — RUN_JOB integration waits for completion
+        run_etl_job = sfn_tasks.GlueStartJobRun(
+            self, "RunEtlJob",
+            glue_job_name=GLUE_JOB_NAME,
+            integration_pattern=sfn.IntegrationPattern.RUN_JOB,
+        )
+
+        # 6. Branch on crawler result (READY → check LastCrawl.Status)
+        check_crawl_result = sfn.Choice(self, "DidCrawlerSucceed?")
+        check_crawl_result.when(
+            sfn.Condition.string_equals(
+                "$.CrawlerStatus.Crawler.LastCrawl.Status", "SUCCEEDED"
+            ),
+            run_etl_job,
+        ).otherwise(crawler_failed)
+
+        # 7. Loop back while crawler is still running
+        is_crawler_running = sfn.Choice(self, "IsCrawlerRunning?")
+        is_crawler_running.when(
+            sfn.Condition.or_(
+                sfn.Condition.string_equals("$.CrawlerStatus.Crawler.State", "RUNNING"),
+                sfn.Condition.string_equals("$.CrawlerStatus.Crawler.State", "STOPPING"),
+            ),
+            wait_for_crawler,
+        ).otherwise(check_crawl_result)
+
+        # Wire up the chain
+        pipeline_definition = (
+            start_crawler_task
+            .next(wait_for_crawler)
+            .next(get_crawler_status)
+            .next(is_crawler_running)
+        )
+
+        pipeline = sfn.StateMachine(
+            self, "IngestPipeline",
+            state_machine_name=STATE_MACHINE_NAME,
+            definition_body=sfn.DefinitionBody.from_chainable(pipeline_definition),
+        )
+
+        # EventBridge fires the state machine when a new object lands in raw/customers/
         new_raw_data_rule = events.Rule(
             self,
             "NewRawDataRule",
-            rule_name=f"{PREFIX}-new-raw-data",
+            rule_name=EVENTBRIDGE_RULE_NAME,
             event_pattern=events.EventPattern(
                 source=["aws.s3"],
                 detail_type=["Object Created"],
@@ -366,7 +431,7 @@ class LakeFormationStack(Stack):
                 },
             ),
         )
-        new_raw_data_rule.add_target(targets.LambdaFunction(crawler_trigger_fn))
+        new_raw_data_rule.add_target(targets.SfnStateMachine(pipeline))
 
         # ──────────────────────────────────────────────────────────────────────
         # 8.  GLUE ETL JOB  (L2 — aws_glue_alpha.Job)
@@ -374,7 +439,7 @@ class LakeFormationStack(Stack):
         glue_job = glue_alpha.Job(
             self,
             "CsvToParquetJob",
-            job_name=f"{PREFIX}-etl",
+            job_name=GLUE_JOB_NAME,
             role=glue_role,
             executable=glue_alpha.JobExecutable.python_etl(
                 glue_version=glue_alpha.GlueVersion.V4_0,
@@ -395,41 +460,20 @@ class LakeFormationStack(Stack):
                 "--enable-job-insights": "true",
                 "--enable-glue-datacatalog": "true",
                 "--job-bookmark-option": "job-bookmark-enable",
-                "--SOURCE_DATABASE": f"{PREFIX}_database",
+                "--SOURCE_DATABASE": GLUE_DATABASE_NAME,
                 "--SOURCE_TABLE": "customers",
                 "--CLEANED_PATH": f"s3://{data_lake_bucket.bucket_name}/cleaned/customers/",
                 "--TARGET_PATH": f"s3://{data_lake_bucket.bucket_name}/curated/customers/",
                 "--PARTITION_KEYS": "year,month",
-                "--TARGET_DATABASE": f"{PREFIX}_database",
+                "--TARGET_DATABASE": GLUE_DATABASE_NAME,
                 "--TARGET_TABLE": "curated_customers",
             },
             description="Transforms raw CSV customers to Parquet and writes to curated zone",
         )
         glue_job.node.add_dependency(glue_db)
 
-        # Fires the ETL job automatically when the crawler finishes successfully.
-        etl_trigger = glue.CfnTrigger(
-            self,
-            "EtlAfterCrawler",
-            name=f"{PREFIX}-etl-trigger",
-            type="CONDITIONAL",
-            start_on_creation=True,
-            actions=[glue.CfnTrigger.ActionProperty(job_name=glue_job.job_name)],
-            predicate=glue.CfnTrigger.PredicateProperty(
-                conditions=[
-                    glue.CfnTrigger.ConditionProperty(
-                        crawler_name=f"{PREFIX}-raw-customers-crawler",
-                        crawl_state="SUCCEEDED",
-                        logical_operator="EQUALS",
-                    )
-                ]
-            ),
-        )
-        etl_trigger.node.add_dependency(glue_crawler)
-        etl_trigger.node.add_dependency(glue_job.node.default_child)
-
         # ──────────────────────────────────────────────────────────────────────
-        # 10.  LF-TAG  (sensitivity classification)
+        # 9.  LF-TAG  (sensitivity classification)
         #     aws_lakeformation has no L2/L3 — CfnTag is the only option.
         # ──────────────────────────────────────────────────────────────────────
         sensitivity_tag = lf.CfnTag(
@@ -441,7 +485,7 @@ class LakeFormationStack(Stack):
         sensitivity_tag.add_dependency(lf_settings)
 
         # ──────────────────────────────────────────────────────────────────────
-        # 11.  LAKE FORMATION PERMISSIONS — ANALYSTS
+        # 10.  LAKE FORMATION PERMISSIONS — ANALYSTS
         #     aws_lakeformation has no L2/L3 — CfnPermissions is the only option.
         # ──────────────────────────────────────────────────────────────────────
 
@@ -455,7 +499,7 @@ class LakeFormationStack(Stack):
             resource=lf.CfnPermissions.ResourceProperty(
                 table_resource=lf.CfnPermissions.TableResourceProperty(
                     catalog_id=account,
-                    database_name=f"{PREFIX}_database",
+                    database_name=GLUE_DATABASE_NAME,
                     table_wildcard=lf.CfnPermissions.TableWildcardProperty(),
                 )
             ),
@@ -474,7 +518,7 @@ class LakeFormationStack(Stack):
             resource=lf.CfnPermissions.ResourceProperty(
                 table_with_columns_resource=lf.CfnPermissions.TableWithColumnsResourceProperty(
                     catalog_id=account,
-                    database_name=f"{PREFIX}_database",
+                    database_name=GLUE_DATABASE_NAME,
                     name="customers",
                     column_names=[
                         "customer_id",
@@ -496,8 +540,8 @@ class LakeFormationStack(Stack):
         bob_row_filter = lf.CfnDataCellsFilter(
             self,
             "BobRowFilter",
-            name=f"{PREFIX}_bob_us_east_1_filter",
-            database_name=f"{PREFIX}_database",
+            name=ROW_FILTER_NAME,
+            database_name=GLUE_DATABASE_NAME,
             table_name="curated_customers",
             table_catalog_id=account,
             row_filter=lf.CfnDataCellsFilter.RowFilterProperty(
@@ -508,13 +552,13 @@ class LakeFormationStack(Stack):
         bob_row_filter.node.add_dependency(glue_db)
 
         # ──────────────────────────────────────────────────────────────────────
-        # 12.  ATHENA WORKGROUP
+        # 11.  ATHENA WORKGROUP
         #      aws_athena has no L2/L3 — CfnWorkGroup is the only option.
         # ──────────────────────────────────────────────────────────────────────
         athena.CfnWorkGroup(
             self,
             "PocWorkGroup",
-            name=f"{PREFIX}-workgroup",
+            name=ATHENA_WORKGROUP_NAME,
             description="Workgroup for Lake Formation PoC Athena queries",
             work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
                 enforce_work_group_configuration=True,
@@ -532,7 +576,7 @@ class LakeFormationStack(Stack):
         )
 
         # ──────────────────────────────────────────────────────────────────────
-        # 13.  CFN OUTPUTS
+        # 12.  CFN OUTPUTS
         # ──────────────────────────────────────────────────────────────────────
         CfnOutput(self, "DataLakeBucketName",
                   value=data_lake_bucket.bucket_name,
@@ -559,10 +603,10 @@ class LakeFormationStack(Stack):
                   value=analyst_bob.user_arn,
                   description="Analyst Bob — restricted columns + us-east-1 rows only")
         CfnOutput(self, "AthenaWorkgroup",
-                  value=f"{PREFIX}-workgroup",
+                  value=ATHENA_WORKGROUP_NAME,
                   description="Use this Athena workgroup for all PoC queries")
         CfnOutput(self, "SampleAthenaQuery",
-                  value=f"SELECT * FROM {PREFIX}_database.customers LIMIT 10;",
+                  value=f"SELECT * FROM {GLUE_DATABASE_NAME}.customers LIMIT 10;",
                   description="Run as Alice (all columns) vs Bob (ssn column hidden)")
 
 
