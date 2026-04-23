@@ -1,0 +1,20 @@
+{
+  "app": "python3 app.py",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "requirements*.txt",
+      ".venv",
+      ".cdk.staging",
+      "dist"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lakeformation:useNewLfTagsApi": true,
+    "@aws-cdk/core:enableStackNameDuplicates": "true",
+    "aws-cdk:enableDiffNoFail": "true",
+    "@aws-cdk/core:stackRelativeExports": "true"
+  }
+}

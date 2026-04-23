@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('lake_formation_cdk/lake_formation_stack.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('lake_formation_cdk/lake_formation_stack.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  }
+}

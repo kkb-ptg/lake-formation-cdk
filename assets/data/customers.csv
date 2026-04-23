@@ -1,0 +1,9 @@
+customer_id,first_name,last_name,email,ssn,region,signup_date,annual_spend
+1,River,Stone,river@example.com,123-45-6789,us-east-1,2023-01-15,4500.00
+2,Sage,Meadows,sage@example.com,987-65-4321,us-west-2,2023-02-20,2300.50
+3,Willow,Forest,willow@example.com,111-22-3333,us-east-1,2023-03-10,8900.75
+4,Cedar,Hill,cedar@example.com,444-55-6666,eu-west-1,2023-04-05,1200.00
+5,Brook,Grove,brook@example.com,777-88-9999,us-east-1,2023-05-18,6700.25
+6,Fern,Lake,fern@example.com,222-33-4444,ap-southeast-1,2023-06-22,3400.00
+7,Glen,Marsh,glen@example.com,555-66-7777,us-east-1,2023-07-30,9100.50
+8,Ivy,Wood,ivy@example.com,888-99-0000,us-west-2,2023-08-12,5600.75
