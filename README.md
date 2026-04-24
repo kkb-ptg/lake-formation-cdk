@@ -1,11 +1,11 @@
 # AWS Lake Formation + Glue Integration PoC — CDK Python
 
-CDK Python implementation of the [DataCamp Lake Formation + Glue tutorial](https://www.datacamp.com/tutorial/aws-lake-formation-and-glue-integration).
+CDK Python implementation of an AWS Lake Formation + Glue integration proof of concept.
 
 ## What gets deployed
 
 | Resource | Details |
-|---|---|
+| --- | --- |
 | **S3 — data lake bucket** | `raw/customers/`, `cleaned/`, `curated/customers/` zones |
 | **S3 — Athena results** | Query output storage |
 | **S3 — Glue scripts** | Hosts the PySpark ETL script |
@@ -53,6 +53,7 @@ cdk deploy --context account=YOUR_ACCOUNT_ID --context region=us-east-1
 After `cdk deploy` completes:
 
 ### Step 1 — Run the Glue Crawler
+
 ```bash
 aws glue start-crawler --name raw-customers-crawler
 # Wait for it to reach READY state (~1-2 min)
@@ -60,6 +61,7 @@ aws glue get-crawler --name raw-customers-crawler --query 'Crawler.State'
 ```
 
 ### Step 2 — Run the Glue ETL Job
+
 ```bash
 aws glue start-job-run --job-name LF-GlueStudio-ETL
 # Monitor status
@@ -68,6 +70,7 @@ aws glue get-job-runs --job-name LF-GlueStudio-ETL \
 ```
 
 ### Step 3 — Query with Athena (as alice — full access)
+
 ```sql
 -- Run in Athena workgroup: lake-formation-poc
 SELECT * FROM poc_database.customers LIMIT 10;
@@ -75,6 +78,7 @@ SELECT * FROM poc_database.customers LIMIT 10;
 ```
 
 ### Step 4 — Query with Athena (as bob — restricted)
+
 ```sql
 -- Switch console role/user to analyst-bob
 SELECT * FROM poc_database.customers LIMIT 10;
@@ -83,6 +87,7 @@ SELECT * FROM poc_database.customers LIMIT 10;
 ```
 
 ### Step 5 — Verify row-level filter on Bob
+
 ```sql
 SELECT region, COUNT(*) as cnt
 FROM poc_database.curated_customers
@@ -92,7 +97,7 @@ GROUP BY region;
 
 ## Project structure
 
-```
+```text
 lake-formation-cdk/
 ├── app.py                          # CDK app entrypoint
 ├── cdk.json
