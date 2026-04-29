@@ -239,10 +239,6 @@ class LakeFormationStack(Stack):
                 lf.CfnDataLakeSettings.DataLakePrincipalProperty(
                     data_lake_principal_identifier=glue_role.role_arn
                 ),
-                # Add your deployment IAM principal here if needed:
-                # lf.CfnDataLakeSettings.DataLakePrincipalProperty(
-                #     data_lake_principal_identifier=f"arn:aws:iam::{account}:root"
-                # ),
             ],
         )
 
