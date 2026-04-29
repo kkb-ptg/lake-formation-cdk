@@ -6,7 +6,9 @@
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('lake_formation_cdk/lake_formation_stack.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -m py_compile lake_formation_cdk/lake_formation_stack.py)",
       "Bash(python3 -m py_compile lake_formation_cdk/lake_formation_stack.py)",
-      "Bash(cdk synth *)"
+      "Bash(cdk synth *)",
+      "Bash(pip3 show *)",
+      "Bash(python3 -c \"import aws_cdk.aws_glue_alpha as g; print\\(dir\\(g.JobExecutable\\)\\)\")"
     ]
   }
 }

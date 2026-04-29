@@ -197,32 +197,32 @@ class LakeFormationStack(Stack):
         )
 
         # ── 2d. Restricted analyst (no SSN column) ────────────────────────────
-        analyst_bob = iam.User(
-            self,
-            "AnalystBob",
-            user_name=ANALYST_BOB_NAME,
-            password=cdk_secret_value("BobP@ssw0rd!"),
-        )
-        analyst_bob.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name("AmazonAthenaFullAccess")
-        )
-        analyst_bob.add_to_policy(
-            iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:ListBucket", "s3:PutObject"],
-                resources=[
-                    athena_results_bucket.bucket_arn,
-                    f"{athena_results_bucket.bucket_arn}/*",
-                    data_lake_bucket.bucket_arn,
-                    f"{data_lake_bucket.bucket_arn}/*",
-                ],
-            )
-        )
-        analyst_bob.add_to_policy(
-            iam.PolicyStatement(
-                actions=["lakeformation:GetDataAccess"],
-                resources=["*"],
-            )
-        )
+        # analyst_bob = iam.User(
+        #     self,
+        #     "AnalystBob",
+        #     user_name=ANALYST_BOB_NAME,
+        #     password=cdk_secret_value("BobP@ssw0rd!"),
+        # )
+        # analyst_bob.add_managed_policy(
+        #     iam.ManagedPolicy.from_aws_managed_policy_name("AmazonAthenaFullAccess")
+        # )
+        # analyst_bob.add_to_policy(
+        #     iam.PolicyStatement(
+        #         actions=["s3:GetObject", "s3:ListBucket", "s3:PutObject"],
+        #         resources=[
+        #             athena_results_bucket.bucket_arn,
+        #             f"{athena_results_bucket.bucket_arn}/*",
+        #             data_lake_bucket.bucket_arn,
+        #             f"{data_lake_bucket.bucket_arn}/*",
+        #         ],
+        #     )
+        # )
+        # analyst_bob.add_to_policy(
+        #     iam.PolicyStatement(
+        #         actions=["lakeformation:GetDataAccess"],
+        #         resources=["*"],
+        #     )
+        # )
 
         # ──────────────────────────────────────────────────────────────────────
         # 3.  LAKE FORMATION ADMIN  +  DATA LOCATION
@@ -436,28 +436,21 @@ class LakeFormationStack(Stack):
         # ──────────────────────────────────────────────────────────────────────
         # 8.  GLUE ETL JOB  (L2 — aws_glue_alpha.Job)
         # ──────────────────────────────────────────────────────────────────────
-        glue_job = glue_alpha.Job(
+        glue_job = glue_alpha.PySparkEtlJob(
             self,
             "CsvToParquetJob",
             job_name=GLUE_JOB_NAME,
             role=glue_role,
-            executable=glue_alpha.JobExecutable.python_etl(
-                glue_version=glue_alpha.GlueVersion.V4_0,
-                python_version=glue_alpha.PythonVersion.THREE,
-                script=glue_alpha.Code.from_bucket(
-                    glue_scripts_bucket,
-                    "scripts/etl_csv_to_parquet.py",
-                ),
+            script=glue_alpha.Code.from_bucket(
+                glue_scripts_bucket,
+                "scripts/etl_csv_to_parquet.py",
             ),
-            worker_count=2,
-            worker_type=glue_alpha.WorkerType.G_1_X,
+            glue_version=glue_alpha.GlueVersion.V4_0,
+            number_of_workers=2,
+            worker_type=glue_alpha.WorkerType.G_1X,
             timeout=Duration.minutes(30),
             max_retries=0,
             default_arguments={
-                "--job-language": "python",
-                "--enable-continuous-cloudwatch-log": "true",
-                "--enable-spark-ui": "true",
-                "--enable-job-insights": "true",
                 "--enable-glue-datacatalog": "true",
                 "--job-bookmark-option": "job-bookmark-enable",
                 "--SOURCE_DATABASE": GLUE_DATABASE_NAME,
@@ -509,47 +502,47 @@ class LakeFormationStack(Stack):
 
         # ── Bob: SELECT restricted columns only on raw customers table ─────────
         # Omits "ssn" — demonstrates column-level security
-        bob_perm = lf.CfnPermissions(
-            self,
-            "BobRestrictedColumns",
-            data_lake_principal=lf.CfnPermissions.DataLakePrincipalProperty(
-                data_lake_principal_identifier=analyst_bob.user_arn
-            ),
-            resource=lf.CfnPermissions.ResourceProperty(
-                table_with_columns_resource=lf.CfnPermissions.TableWithColumnsResourceProperty(
-                    catalog_id=account,
-                    database_name=GLUE_DATABASE_NAME,
-                    name="customers",
-                    column_names=[
-                        "customer_id",
-                        "first_name",
-                        "last_name",
-                        "email",
-                        "region",
-                        "signup_date",
-                        "annual_spend",
-                        # "ssn" intentionally excluded
-                    ],
-                )
-            ),
-            permissions=["SELECT", "DESCRIBE"],
-        )
-        bob_perm.node.add_dependency(glue_db)
+        # bob_perm = lf.CfnPermissions(
+        #     self,
+        #     "BobRestrictedColumns",
+        #     data_lake_principal=lf.CfnPermissions.DataLakePrincipalProperty(
+        #         data_lake_principal_identifier=analyst_bob.user_arn
+        #     ),
+        #     resource=lf.CfnPermissions.ResourceProperty(
+        #         table_with_columns_resource=lf.CfnPermissions.TableWithColumnsResourceProperty(
+        #             catalog_id=account,
+        #             database_name=GLUE_DATABASE_NAME,
+        #             name="customers",
+        #             column_names=[
+        #                 "customer_id",
+        #                 "first_name",
+        #                 "last_name",
+        #                 "email",
+        #                 "region",
+        #                 "signup_date",
+        #                 "annual_spend",
+        #                 # "ssn" intentionally excluded
+        #             ],
+        #         )
+        #     ),
+        #     permissions=["SELECT", "DESCRIBE"],
+        # )
+        # bob_perm.node.add_dependency(glue_db)
 
-        # ── Bob: Row-level filter — only us-east-1 rows on curated table ───────
-        bob_row_filter = lf.CfnDataCellsFilter(
-            self,
-            "BobRowFilter",
-            name=ROW_FILTER_NAME,
-            database_name=GLUE_DATABASE_NAME,
-            table_name="curated_customers",
-            table_catalog_id=account,
-            row_filter=lf.CfnDataCellsFilter.RowFilterProperty(
-                filter_expression="region = 'us-east-1'"
-            ),
-            column_wildcard=lf.CfnDataCellsFilter.ColumnWildcardProperty(),
-        )
-        bob_row_filter.node.add_dependency(glue_db)
+        # # ── Bob: Row-level filter — only us-east-1 rows on curated table ───────
+        # bob_row_filter = lf.CfnDataCellsFilter(
+        #     self,
+        #     "BobRowFilter",
+        #     name=ROW_FILTER_NAME,
+        #     database_name=GLUE_DATABASE_NAME,
+        #     table_name="curated_customers",
+        #     table_catalog_id=account,
+        #     row_filter=lf.CfnDataCellsFilter.RowFilterProperty(
+        #         filter_expression="region = 'us-east-1'"
+        #     ),
+        #     column_wildcard=lf.CfnDataCellsFilter.ColumnWildcardProperty(),
+        # )
+        # bob_row_filter.node.add_dependency(glue_db)
 
         # ──────────────────────────────────────────────────────────────────────
         # 11.  ATHENA WORKGROUP
@@ -599,9 +592,9 @@ class LakeFormationStack(Stack):
         CfnOutput(self, "AliceUserArn",
                   value=analyst_alice.user_arn,
                   description="Analyst Alice — full column access")
-        CfnOutput(self, "BobUserArn",
-                  value=analyst_bob.user_arn,
-                  description="Analyst Bob — restricted columns + us-east-1 rows only")
+        # CfnOutput(self, "BobUserArn",
+        #           value=analyst_bob.user_arn,
+        #           description="Analyst Bob — restricted columns + us-east-1 rows only")
         CfnOutput(self, "AthenaWorkgroup",
                   value=ATHENA_WORKGROUP_NAME,
                   description="Use this Athena workgroup for all PoC queries")

@@ -22,3 +22,4 @@ cdk.context.json
 *.tmp
 *.env
 *.env.*
+settings.local.json
