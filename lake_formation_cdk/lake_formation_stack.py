@@ -37,6 +37,7 @@ from aws_cdk import (
     aws_stepfunctions_tasks as sfn_tasks,
 )
 import aws_cdk.aws_glue_alpha as glue_alpha
+from aws_cdk import DefaultStackSynthesizer
 from constructs import Construct
 from lake_formation_cdk.config import (
     LF_SERVICE_ROLE_NAME,
@@ -168,33 +169,33 @@ class LakeFormationStack(Stack):
             )
         )
 
-        # ── 2c. Data engineer user (full access) ──────────────────────────────
-        analyst_alice = iam.User(
-            self,
-            "AnalystAlice",
-            user_name=ANALYST_ALICE_NAME,
-            password=cdk_secret_value("AliceP@ssw0rd!"),
-        )
-        analyst_alice.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name("AmazonAthenaFullAccess")
-        )
-        analyst_alice.add_to_policy(
-            iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:ListBucket", "s3:PutObject"],
-                resources=[
-                    athena_results_bucket.bucket_arn,
-                    f"{athena_results_bucket.bucket_arn}/*",
-                    data_lake_bucket.bucket_arn,
-                    f"{data_lake_bucket.bucket_arn}/*",
-                ],
-            )
-        )
-        analyst_alice.add_to_policy(
-            iam.PolicyStatement(
-                actions=["lakeformation:GetDataAccess"],
-                resources=["*"],
-            )
-        )
+        # # ── 2c. Data engineer user (full access) ──────────────────────────────
+        # analyst_alice = iam.User(
+        #     self,
+        #     "AnalystAlice",
+        #     user_name=ANALYST_ALICE_NAME,
+        #     password=cdk_secret_value("AliceP@ssw0rd!"),
+        # )
+        # analyst_alice.add_managed_policy(
+        #     iam.ManagedPolicy.from_aws_managed_policy_name("AmazonAthenaFullAccess")
+        # )
+        # analyst_alice.add_to_policy(
+        #     iam.PolicyStatement(
+        #         actions=["s3:GetObject", "s3:ListBucket", "s3:PutObject"],
+        #         resources=[
+        #             athena_results_bucket.bucket_arn,
+        #             f"{athena_results_bucket.bucket_arn}/*",
+        #             data_lake_bucket.bucket_arn,
+        #             f"{data_lake_bucket.bucket_arn}/*",
+        #         ],
+        #     )
+        # )
+        # analyst_alice.add_to_policy(
+        #     iam.PolicyStatement(
+        #         actions=["lakeformation:GetDataAccess"],
+        #         resources=["*"],
+        #     )
+        # )
 
         # ── 2d. Restricted analyst (no SSN column) ────────────────────────────
         # analyst_bob = iam.User(
@@ -228,7 +229,21 @@ class LakeFormationStack(Stack):
         # 3.  LAKE FORMATION ADMIN  +  DATA LOCATION
         # ──────────────────────────────────────────────────────────────────────
 
-        # Register CDK execution role + Glue role as LF admins
+        # CfnDataLakeSettings REPLACES the entire admin list, so the CDK bootstrap
+        # CloudFormation execution role must be included. Without it, subsequent LF
+        # resources (CfnResource, CfnPermissions) are rejected with "Invalid principal"
+        # because the role performing the deployment is no longer an LF admin.
+        # Reads the qualifier from CDK context (set when using --qualifier at bootstrap)
+        # and falls back to the CDK default so custom bootstrap qualifiers are handled.
+        qualifier = (
+            self.node.try_get_context("@aws-cdk/core:bootstrapQualifier")
+            or DefaultStackSynthesizer.DEFAULT_QUALIFIER
+        )
+        cfn_exec_role_arn = (
+            f"arn:aws:iam::{account}:role/"
+            f"cdk-{qualifier}-cfn-exec-role-{account}-{region}"
+        )
+
         lf_settings = lf.CfnDataLakeSettings(
             self,
             "LakeFormationSettings",
@@ -238,6 +253,9 @@ class LakeFormationStack(Stack):
                 ),
                 lf.CfnDataLakeSettings.DataLakePrincipalProperty(
                     data_lake_principal_identifier=glue_role.role_arn
+                ),
+                lf.CfnDataLakeSettings.DataLakePrincipalProperty(
+                    data_lake_principal_identifier=cfn_exec_role_arn
                 ),
             ],
         )
@@ -479,22 +497,22 @@ class LakeFormationStack(Stack):
         # ──────────────────────────────────────────────────────────────────────
 
         # ── Alice: SELECT all columns on ALL tables in poc_database ───────────
-        alice_perm = lf.CfnPermissions(
-            self,
-            "AliceSelectAllTables",
-            data_lake_principal=lf.CfnPermissions.DataLakePrincipalProperty(
-                data_lake_principal_identifier=analyst_alice.user_arn
-            ),
-            resource=lf.CfnPermissions.ResourceProperty(
-                table_resource=lf.CfnPermissions.TableResourceProperty(
-                    catalog_id=account,
-                    database_name=GLUE_DATABASE_NAME,
-                    table_wildcard=lf.CfnPermissions.TableWildcardProperty(),
-                )
-            ),
-            permissions=["SELECT", "DESCRIBE"],
-        )
-        alice_perm.node.add_dependency(glue_db)
+        # alice_perm = lf.CfnPermissions(
+        #     self,
+        #     "AliceSelectAllTables",
+        #     data_lake_principal=lf.CfnPermissions.DataLakePrincipalProperty(
+        #         data_lake_principal_identifier=analyst_alice.user_arn
+        #     ),
+        #     resource=lf.CfnPermissions.ResourceProperty(
+        #         table_resource=lf.CfnPermissions.TableResourceProperty(
+        #             catalog_id=account,
+        #             database_name=GLUE_DATABASE_NAME,
+        #             table_wildcard=lf.CfnPermissions.TableWildcardProperty(),
+        #         )
+        #     ),
+        #     permissions=["SELECT", "DESCRIBE"],
+        # )
+        # alice_perm.node.add_dependency(glue_db)
 
         # ── Bob: SELECT restricted columns only on raw customers table ─────────
         # Omits "ssn" — demonstrates column-level security
@@ -585,9 +603,9 @@ class LakeFormationStack(Stack):
         CfnOutput(self, "GlueRoleArn",
                   value=glue_role.role_arn,
                   description="IAM role used by Glue and registered as LF admin")
-        CfnOutput(self, "AliceUserArn",
-                  value=analyst_alice.user_arn,
-                  description="Analyst Alice — full column access")
+        # CfnOutput(self, "AliceUserArn",
+        #           value=analyst_alice.user_arn,
+        #           description="Analyst Alice — full column access")
         # CfnOutput(self, "BobUserArn",
         #           value=analyst_bob.user_arn,
         #           description="Analyst Bob — restricted columns + us-east-1 rows only")
